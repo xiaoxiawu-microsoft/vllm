@@ -33,7 +33,7 @@ class Fp8Config(QuantizationConfig):
         # TODO: PyTorch 2.3.0+ is required to run FP8 on
         # SM 89 (e.g. Ada) GPUs. Specifically, this PR has to
         # be included: https://github.com/pytorch/pytorch/pull/118881
-        return 90
+        return 80
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
