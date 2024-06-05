@@ -305,7 +305,7 @@ def invoke_moe_scatter(
     )
 
 
-def test_gather_scatter(tokens=1280, hidden_size = 4096, experts = 16, block_m = 128, block_k = 128, topk = 2, splitk = 1):
+def test_gather_scatter(tokens=1, hidden_size = 4096, experts = 16, block_m = 128, block_k = 128, topk = 2, splitk = 4):
     hidden_states = torch.randn(tokens, hidden_size).cuda().bfloat16()
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_states.half(), gatew).float()
