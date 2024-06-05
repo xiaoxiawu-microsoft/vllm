@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.model_executor.layers.fused_moe import gather_scatter_kernel
+
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils import is_hip
@@ -85,11 +87,14 @@ def fused_moe(
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
+    block_m = 128
+    block_k = 128
+    splitk = 4
 
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
 
-    sorted_ids, expert_ids, num_tokens_post_pad, expert_off, expert_length = (
+    sorted_token_ids, expert_ids, num_tokens_post_padded, expert_off, expert_length = (
         moe_align_block_size(topk_ids, 128, E)
     )
 
@@ -111,9 +116,50 @@ def fused_moe(
         dtype=hidden_states.dtype,
     )
 
+    gathered_cache = torch.zeros(
+        (sorted_token_ids.size(0), hidden_states.size(1)),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
+    # hidden states -> sorted hidden states
+    gather_scatter_kernel.invoke_moe_gather(
+        hidden_states,
+        gathered_cache,
+        sorted_token_ids,
+        num_tokens_post_padded,
+        topk_ids,
+        block_m,
+        block_k,
+        topk,
+        4,
+    )
+
+    # grouped gemm
+    #for i in range(0, E):
+    #    start = expert_off[i]
+    #    end = expert_off[i] + expert_length[i]
+    #    if start == end:
+    #        continue
+    #    act = gathered_cache[start:end]
+
+
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+
+
+    gather_scatter_kernel.invoke_moe_scatter(
+        intermediate_cache1,
+        intermediate_cache2,
+        sorted_token_ids,
+        num_tokens_post_padded,
+        topk_ids,
+        block_m,
+        block_k,
+        topk,
+        splitk
+    )
 
     if inplace:
         return torch.sum(
