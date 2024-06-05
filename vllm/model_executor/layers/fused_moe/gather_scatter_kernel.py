@@ -2,6 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
+import pytest
+
 import vllm
 from vllm import _custom_ops as ops
 
@@ -70,7 +72,7 @@ def moe_gather(
     splitk: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    pid_m = tl.cdiv(pid, splitk)
+    pid_m = pid // splitk
     pid_n = pid % splitk
 
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
@@ -129,7 +131,7 @@ def moe_scatter(
     splitk: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
-    pid_m = tl.cdiv(pid, splitk)
+    pid_m = pid // splitk
     pid_n = pid % splitk
 
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
@@ -303,7 +305,7 @@ def invoke_moe_scatter(
     )
 
 
-def test_gather_scatter(tokens=1, hidden_size = 32, experts = 2, block_m = 2, block_k = 128, topk = 2, splitk = 1):
+def test_gather_scatter(tokens=1280, hidden_size = 4096, experts = 16, block_m = 128, block_k = 128, topk = 2, splitk = 1):
     hidden_states = torch.randn(tokens, hidden_size).cuda().bfloat16()
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_states.half(), gatew).float()
@@ -351,7 +353,7 @@ def test_gather_scatter(tokens=1, hidden_size = 32, experts = 2, block_m = 2, bl
         block_m,
         block_k,
         topk,
-        splitk=4
+        splitk
     )
 
     print("intermediate_cache2")

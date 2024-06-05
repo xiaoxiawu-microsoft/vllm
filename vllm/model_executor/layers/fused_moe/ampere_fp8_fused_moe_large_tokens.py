@@ -92,7 +92,7 @@ def fused_moe(
     sorted_ids, expert_ids, num_tokens_post_pad, expert_off, expert_length = (
         moe_align_block_size(topk_ids, 128, E)
     )
-    
+
     # assert torch.sum(expert_length) == M * topk, f"Number of tokens mismatch, {torch.sum(expert_length)} != {M * topk}"
 
     intermediate_cache1 = torch.empty(
