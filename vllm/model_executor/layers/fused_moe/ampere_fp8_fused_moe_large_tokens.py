@@ -15,9 +15,53 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
+import bitblas
+from bitblas.ops.general_matmul_splitk import MatmulWithSplitK, MatmulConfigWithSplitK
+
 logger = init_logger(__name__)
 
+bitblas.set_log_level("Debug")
 
+# Grouped gemm
+def grouped_gemm(
+    M,
+    N,
+    K,
+    A_dtype="float16",
+    W_dtype="e4m3_float8",
+    accum_dtype="float32",
+    out_dtype="float16",
+    layout="nt",
+    with_bias=False,
+    group_size=-1,
+    with_scaling=False,
+    with_zeros=False,
+    zeros_mode=None,
+    SplitK=4,
+):
+    matmul_config = MatmulConfigWithSplitK(
+        k_split=SplitK,
+        M=[1, 16],
+        N=N,
+        K=K,
+        A_dtype=A_dtype,
+        W_dtype=W_dtype,
+        accum_dtype=accum_dtype,
+        out_dtype=out_dtype,
+        layout=layout,
+        with_bias=with_bias,
+        group_size=group_size,
+        with_scaling=with_scaling,
+        with_zeros=with_zeros,
+        zeros_mode=zeros_mode,
+        propagate_a=False,
+        propagate_b=False,
+    )
+    matmul = MatmulWithSplitK(config=matmul_config, enable_tuning=True)
+    return matmul
+
+
+# Ampere FP8 kernel
 from torch.utils.cpp_extension import load
 
 ampere_fp8 = load(
@@ -91,6 +135,9 @@ def fused_moe(
     block_k = 128
     splitk = 4
 
+    hidden_states_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float16)
+
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
 
@@ -98,31 +145,17 @@ def fused_moe(
         moe_align_block_size(topk_ids, 128, E)
     )
 
-    # assert torch.sum(expert_length) == M * topk, f"Number of tokens mismatch, {torch.sum(expert_length)} != {M * topk}"
-
-    intermediate_cache1 = torch.empty(
-        (M, topk_ids.shape[1], N),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
-    intermediate_cache2 = torch.empty(
-        (M * topk_ids.shape[1], N // 2),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
     intermediate_cache3 = torch.empty(
         (M, topk_ids.shape[1], w2.shape[1]),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
 
-    gathered_cache = torch.zeros(
+    gathered_cache = torch.empty(
         (sorted_token_ids.size(0), hidden_states.size(1)),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
-
-    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
     # hidden states -> sorted hidden states
     gather_scatter_kernel.invoke_moe_gather(
@@ -137,29 +170,56 @@ def fused_moe(
         4,
     )
 
-    # grouped gemm
-    #for i in range(0, E):
-    #    start = expert_off[i]
-    #    end = expert_off[i] + expert_length[i]
-    #    if start == end:
-    #        continue
-    #    act = gathered_cache[start:end]
+    ggemm_kernel_1 = grouped_gemm(M, N, hidden_states.size(1))
+    ggemm_kernel_2 = grouped_gemm(M, hidden_states.size(1), N // 2)
 
+    gathered_cache_1 = torch.empty(
+        (M * topk, N),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
 
-    ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+    gathered_cache_2 = torch.empty(
+        (M * topk, N // 2),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
 
+    gathered_cache_3 = torch.empty(
+        (M * topk, hidden_states.size(1)),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+
+    for i in range(0, E):
+        start = expert_off[i]
+        end = expert_off[i] + expert_length[i]
+        ggemm_kernel_1.forward(
+            gathered_cache[start:end, :], w1[i, :, :], output=gathered_cache_1[start:end, :]
+        )
+
+    ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
+
+    for i in range(0, E):
+        start = expert_off[i]
+        end = expert_off[i] + expert_length[i]
+        ggemm_kernel_2.forward(
+            gathered_cache_2[start:end, :], w2[i, :, :], output=gathered_cache_3[start:end, :]
+        )
 
     gather_scatter_kernel.invoke_moe_scatter(
-        intermediate_cache1,
-        intermediate_cache2,
+        gathered_cache_3,
+        intermediate_cache3,
         sorted_token_ids,
         num_tokens_post_padded,
         topk_ids,
         block_m,
         block_k,
         topk,
-        splitk
+        splitk,
     )
+
+    intermediate_cache3 = intermediate_cache3.to(hidden_states_dtype)
 
     if inplace:
         return torch.sum(
