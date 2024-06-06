@@ -142,7 +142,7 @@ def moe_perf(
     gating_output = torch.matmul(hidden_state.half(), gatew).float()
 
 
-    @timeit_decorator()
+    #@timeit_decorator()
     def run_fused_moe(*args, **kwargs):
         fused_moe_f(*args, **kwargs)
 

@@ -10,56 +10,13 @@ import triton
 import triton.language as tl
 
 from vllm.model_executor.layers.fused_moe import gather_scatter_kernel
+from vllm.model_executor.layers.fused_moe import grouped_gemm_kernel
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils import is_hip
 
-import bitblas
-from bitblas.ops.general_matmul_splitk import MatmulWithSplitK, MatmulConfigWithSplitK
-
 logger = init_logger(__name__)
-
-bitblas.set_log_level("Debug")
-
-# Grouped gemm
-def grouped_gemm(
-    M,
-    N,
-    K,
-    A_dtype="float16",
-    W_dtype="e4m3_float8",
-    accum_dtype="float32",
-    out_dtype="float16",
-    layout="nt",
-    with_bias=False,
-    group_size=-1,
-    with_scaling=False,
-    with_zeros=False,
-    zeros_mode=None,
-    SplitK=4,
-):
-    matmul_config = MatmulConfigWithSplitK(
-        k_split=SplitK,
-        M=[1, 16],
-        N=N,
-        K=K,
-        A_dtype=A_dtype,
-        W_dtype=W_dtype,
-        accum_dtype=accum_dtype,
-        out_dtype=out_dtype,
-        layout=layout,
-        with_bias=with_bias,
-        group_size=group_size,
-        with_scaling=with_scaling,
-        with_zeros=with_zeros,
-        zeros_mode=zeros_mode,
-        propagate_a=False,
-        propagate_b=False,
-    )
-    matmul = MatmulWithSplitK(config=matmul_config, enable_tuning=True)
-    return matmul
-
 
 # Ampere FP8 kernel
 from torch.utils.cpp_extension import load
@@ -87,9 +44,9 @@ def moe_align_block_size(
     )
     sorted_ids.fill_(topk_ids.numel())
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
-    expert_off = torch.empty((num_experts), dtype=torch.int32, device=topk_ids.device)
+    expert_off = torch.empty((num_experts + 1), dtype=torch.int32, device=topk_ids.device)
     expert_length = torch.empty(
-        (num_experts), dtype=torch.int32, device=topk_ids.device
+        (num_experts + 1), dtype=torch.int32, device=topk_ids.device
     )
 
     ampere_fp8.ops.moe_align_block_size(
@@ -129,7 +86,7 @@ def fused_moe(
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
-    M, _ = hidden_states.shape
+    M, K = hidden_states.shape
     E, N, _ = w1.shape
     block_m = 128
     block_k = 128
@@ -146,7 +103,7 @@ def fused_moe(
     )
 
     intermediate_cache3 = torch.empty(
-        (M, topk_ids.shape[1], w2.shape[1]),
+        (M, topk, K),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
@@ -170,32 +127,40 @@ def fused_moe(
         4,
     )
 
-    ggemm_kernel_1 = grouped_gemm(M, N, hidden_states.size(1))
-    ggemm_kernel_2 = grouped_gemm(M, hidden_states.size(1), N // 2)
+    ggemm_kernel_1 = grouped_gemm_kernel.grouped_gemm(M, N, K)
+    ggemm_kernel_2 = grouped_gemm_kernel.grouped_gemm(M, K, N // 2)
 
     gathered_cache_1 = torch.empty(
-        (M * topk, N),
+        (sorted_token_ids.size(0), N),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
 
     gathered_cache_2 = torch.empty(
-        (M * topk, N // 2),
+        (sorted_token_ids.size(0), N // 2),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
 
     gathered_cache_3 = torch.empty(
-        (M * topk, hidden_states.size(1)),
+        (sorted_token_ids.size(0), K),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
 
     for i in range(0, E):
-        start = expert_off[i]
-        end = expert_off[i] + expert_length[i]
+        #start = expert_off[i]
+        #end = expert_off[i] + expert_length[i]
+
+        start = 10
+        end = 20
+
+        a = gathered_cache[start:end, :]
+        w = w1[i, :, :]
+        c = gathered_cache_1[start:end, :]
+
         ggemm_kernel_1.forward(
-            gathered_cache[start:end, :], w1[i, :, :], output=gathered_cache_1[start:end, :]
+            a, w, output=c
         )
 
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
@@ -203,13 +168,18 @@ def fused_moe(
     for i in range(0, E):
         start = expert_off[i]
         end = expert_off[i] + expert_length[i]
+
+        a = gathered_cache_2[start:end, :]
+        w = w2[i, :, :]
+        o = gathered_cache_3[start:end, :]
+
         ggemm_kernel_2.forward(
-            gathered_cache_2[start:end, :], w2[i, :, :], output=gathered_cache_3[start:end, :]
+            a, w, output=o
         )
 
     gather_scatter_kernel.invoke_moe_scatter(
         gathered_cache_3,
-        intermediate_cache3,
+        intermediate_cache3.view(-1, K),
         sorted_token_ids,
         num_tokens_post_padded,
         topk_ids,
