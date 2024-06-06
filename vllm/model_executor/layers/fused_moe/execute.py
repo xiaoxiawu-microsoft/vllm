@@ -9,6 +9,7 @@ import shutil
 
 import fused_moe
 import ampere_fp8_fused_moe_large_tokens
+import ampere_fp8_fused_moe
 
 
 import functools
@@ -117,22 +118,26 @@ def moe_perf(
 ):
     torch.manual_seed(0)
 
-    hidden_state = torch.randn(tokens, hidden_size).cuda().bfloat16()
+    hidden_state = torch.randn(tokens, hidden_size).uniform_(-1, 1).cuda().half()
 
     if use_fp8:
+        w1_f32 = torch.randn(experts, intermediate_size * 2, hidden_size).uniform_(-1, 1).cuda()
         w1, ws_scale = ops.scaled_fp8_quant(
-            torch.randn(experts, intermediate_size * 2, hidden_size).cuda().half()
+            w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device) * 0.0022
         )
+        w2_f32 = torch.ones(experts, hidden_size, intermediate_size).uniform_(-1, 1).cuda()
         w2, w2s_scale = ops.scaled_fp8_quant(
-            torch.randn(experts, hidden_size, intermediate_size).cuda().half()
+            w2_f32.half()
         )
         _, h_scale = ops.scaled_fp8_quant(hidden_state)
-        ws_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device)
-        w2s_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device)
+        print(f"ws_scale: {ws_scale}")
+        print(f"w2s_scale: {w2s_scale}")
+        #ws_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device) * ws_scale
+        w2s_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device) * w2s_scale
         fused_moe_f = ampere_fp8_fused_moe_large_tokens.fused_moe
     else:
-        w1 = torch.randn(experts, intermediate_size * 2, hidden_size).cuda().bfloat16()
-        w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().bfloat16()
+        w1 = torch.randn(experts, intermediate_size * 2, hidden_size).cuda().half()
+        w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().half()
         h_scale = None
         ws_scale = None
         w2s_scale = None
@@ -141,19 +146,18 @@ def moe_perf(
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_state.half(), gatew).float()
 
-
     #@timeit_decorator()
     def run_fused_moe(*args, **kwargs):
-        fused_moe_f(*args, **kwargs)
+        return fused_moe_f(*args, **kwargs)
 
-    run_fused_moe(
+    r1 = run_fused_moe(
         hidden_states=hidden_state,
         w1=w1,
         w2=w2,
         gating_output=gating_output,
         topk=topk,
         override_config=config,
-        renormalize=True,
+        renormalize=False,
         inplace=True,
         use_fp8=use_fp8,
         w1_scale=ws_scale,
@@ -163,8 +167,24 @@ def moe_perf(
         routing_func=sparsemixer
     )
 
+    r2 = fused_moe.fused_moe(
+        hidden_states=hidden_state,
+        w1=w1_f32.half(),
+        w2=w2_f32.half(),
+        gating_output=gating_output,
+        topk=topk,
+        override_config=config,
+        renormalize=False,
+        inplace=True,
+        use_fp8=False,
+        routing_func=sparsemixer
+    )
+
+    print(r1)
+    print(r2)
+    torch.testing.assert_close(r1, r2, rtol=1e-0, atol=1e-1)
+
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
-#searchspace = [1, 4096]
 intermediate_size = 6400
 expert_num = 16
 

@@ -455,7 +455,11 @@ def fused_moe(
                             compute_type=compute_type,
                             use_fp8=use_fp8)
 
+    return intermediate_cache1
+
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+
+    return intermediate_cache2
 
     invoke_fused_moe_kernel(intermediate_cache2,
                             w2,

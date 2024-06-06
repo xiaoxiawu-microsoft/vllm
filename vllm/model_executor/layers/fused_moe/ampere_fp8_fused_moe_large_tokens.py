@@ -88,16 +88,15 @@ def fused_moe(
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
     M, K = hidden_states.shape
     E, N, _ = w1.shape
-    block_m = 128
+    block_m = 16
     block_k = 128
     splitk = 4
-
 
     hidden_states_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float16)
 
-    g_w1_scale = w1_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, K).contiguous()
-    g_w2_scale = w2_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, N // 2).contiguous()
+    g_w1_scale = w1_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, N).contiguous()
+    g_w2_scale = w2_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, K).contiguous()
 
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
@@ -113,7 +112,7 @@ def fused_moe(
     )
 
     gathered_cache = torch.empty(
-        (sorted_token_ids.size(0), hidden_states.size(1)),
+        (sorted_token_ids.size(0), K),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
@@ -153,12 +152,8 @@ def fused_moe(
     )
 
     for i in range(0, E):
-        #start = expert_off[i]
-        #end = expert_off[i] + expert_length[i]
-
-        start = 10
-        end = 20
-
+        start = expert_off[i]
+        end = expert_off[i] + expert_length[i]
         a = gathered_cache[start:end, :]
         w = w1[i, :, :]
         c = gathered_cache_1[start:end, :]
@@ -168,7 +163,47 @@ def fused_moe(
             a, w, scale=scale, output=c
         )
 
+    debug_scatter_cache = torch.empty(
+        (M, topk, N),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+
+    gather_scatter_kernel.invoke_moe_scatter(
+        gathered_cache_1,
+        debug_scatter_cache.view(-1, N),
+        sorted_token_ids,
+        num_tokens_post_padded,
+        topk_ids,
+        block_m,
+        block_k,
+        topk,
+        splitk,
+    )
+
+    return debug_scatter_cache.to(hidden_states_dtype)
+
+    debug_scatter_cache = torch.empty(
+        (M, topk, N//2),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
+    
+    gather_scatter_kernel.invoke_moe_scatter(
+        gathered_cache_2,
+        debug_scatter_cache.view(-1, N//2),
+        sorted_token_ids,
+        num_tokens_post_padded,
+        topk_ids,
+        block_m,
+        block_k,
+        topk,
+        splitk,
+    )
+
+    return debug_scatter_cache.to(torch.bfloat16).view(M*topk, N//2)
 
     for i in range(0, E):
         start = expert_off[i]
@@ -198,6 +233,7 @@ def fused_moe(
     intermediate_cache3 = intermediate_cache3.to(hidden_states_dtype)
 
     if inplace:
+        hidden_states = hidden_states.view(dtype=hidden_states_dtype)
         return torch.sum(
             intermediate_cache3.view(*intermediate_cache3.shape),
             dim=1,

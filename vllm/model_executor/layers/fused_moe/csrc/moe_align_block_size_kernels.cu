@@ -70,7 +70,6 @@ __global__ void moe_align_block_size_kernel(scalar_t *__restrict__ topk_ids,
             expert_length[i-1] = tokens_cnts[index(num_experts, blockDim.x, i - 1)];
         }
         *total_tokens_post_pad = cumsum[num_experts];
-        expert_offset[num_experts-1] = tokens_cnts[index(num_experts, blockDim.x, num_experts - 1)];
     }
 
     __syncthreads();
