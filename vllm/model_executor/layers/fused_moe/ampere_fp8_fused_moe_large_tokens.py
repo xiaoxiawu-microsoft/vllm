@@ -92,8 +92,12 @@ def fused_moe(
     block_k = 128
     splitk = 4
 
+
     hidden_states_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float16)
+
+    g_w1_scale = w1_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, K).contiguous()
+    g_w2_scale = w2_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, N // 2).contiguous()
 
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
@@ -127,8 +131,8 @@ def fused_moe(
         4,
     )
 
-    ggemm_kernel_1 = grouped_gemm_kernel.grouped_gemm(M, N, K)
-    ggemm_kernel_2 = grouped_gemm_kernel.grouped_gemm(M, K, N // 2)
+    ggemm_kernel_1 = grouped_gemm_kernel.grouped_gemm(M, N, K, with_scaling=True)
+    ggemm_kernel_2 = grouped_gemm_kernel.grouped_gemm(M, K, N // 2, with_scaling=True)
 
     gathered_cache_1 = torch.empty(
         (sorted_token_ids.size(0), N),
@@ -158,9 +162,10 @@ def fused_moe(
         a = gathered_cache[start:end, :]
         w = w1[i, :, :]
         c = gathered_cache_1[start:end, :]
+        scale = g_w1_scale[i, :]
 
         ggemm_kernel_1.forward(
-            a, w, output=c
+            a, w, scale=scale, output=c
         )
 
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
@@ -171,10 +176,11 @@ def fused_moe(
 
         a = gathered_cache_2[start:end, :]
         w = w2[i, :, :]
-        o = gathered_cache_3[start:end, :]
+        c = gathered_cache_3[start:end, :]
+        scale = g_w2_scale[i, :]
 
         ggemm_kernel_2.forward(
-            a, w, output=o
+            a, w, scale=scale,output=c
         )
 
     gather_scatter_kernel.invoke_moe_scatter(
