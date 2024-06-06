@@ -116,6 +116,7 @@ def moe_scatter(
     c_ptr,
     sorted_token_ids_ptr,
     num_tokens_post_padded_ptr,
+    topk_weights_ptr,
     M,
     K,
     EM,
@@ -125,6 +126,7 @@ def moe_scatter(
     stride_cm,
     stride_ck,
     # Meta-parameters
+    MUL_ROUTED_WEIGHT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     topk: tl.constexpr,
@@ -148,6 +150,9 @@ def moe_scatter(
 
     c_ptrs = c_ptr + (offs_token[:, None] * stride_cm + offs_k[None, :] * stride_ck)
 
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=w_token_mask, other=0)
+
     SPLITED_K = tl.cdiv(K, BLOCK_SIZE_K) // splitk
     a_ptrs = a_ptrs + pid_n * SPLITED_K * BLOCK_SIZE_K * stride_ak
     c_ptrs = c_ptrs + pid_n * SPLITED_K * BLOCK_SIZE_K * stride_ck
@@ -160,6 +165,8 @@ def moe_scatter(
             mask=a_mask,
             other=0.0,
         )
+        if MUL_ROUTED_WEIGHT:
+            a = a * moe_weight[:, None]
         tl.store(c_ptrs, a, mask=c_mask)
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
@@ -282,6 +289,7 @@ def invoke_moe_scatter(
     block_k,
     topk,
     splitk=1,
+    topk_weights=None,
 ):
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], block_m) * splitk,)
 
@@ -290,6 +298,7 @@ def invoke_moe_scatter(
         outp,
         sorted_token_ids,
         num_tokens_post_padded,
+        topk_weights,
         inp.size(0),
         inp.size(1),
         sorted_token_ids.size(0),
@@ -298,6 +307,7 @@ def invoke_moe_scatter(
         inp.stride(1),
         outp.stride(0),
         outp.stride(1),
+        topk_weights is not None,
         BLOCK_SIZE_M=block_m,
         BLOCK_SIZE_K=block_k,
         topk=topk,
@@ -353,7 +363,7 @@ def test_gather_scatter(tokens=4096, hidden_size = 4096, experts = 16, block_m =
         block_m,
         block_k,
         topk,
-        splitk
+        splitk,
     )
 
     print("intermediate_cache2")
