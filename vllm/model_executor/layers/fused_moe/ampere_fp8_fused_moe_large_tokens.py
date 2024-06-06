@@ -228,6 +228,7 @@ def fused_moe(
         block_k,
         topk,
         splitk,
+        topk_weights=topk_weights,
     )
 
     intermediate_cache3 = intermediate_cache3.to(hidden_states_dtype)
