@@ -61,8 +61,8 @@ def is_sm80(device_id=0):
     return (device_properties.major == 8 and device_properties.minor == 0)
 
 if is_sm80():
-    from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe
-    fused_moe_a100 = ampere_fp8_fused_moe.fused_moe
+    from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe_large_tokens
+    fused_moe_a100 = ampere_fp8_fused_moe_large_tokens.fused_moe
     
 logger = logging.get_logger(__name__)
 

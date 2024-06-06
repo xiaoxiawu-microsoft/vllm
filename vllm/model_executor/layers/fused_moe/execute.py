@@ -118,24 +118,20 @@ def moe_perf(
 ):
     torch.manual_seed(0)
 
-    hidden_state = torch.ones(tokens, hidden_size).cuda().half()
+    hidden_state = torch.randn(tokens, hidden_size).uniform_(-1, 1).cuda().half()
 
     if use_fp8:
-        w1_f32 = torch.ones(experts, intermediate_size * 2, hidden_size).cuda()
+        w1_f32 = torch.randn(experts, intermediate_size * 2, hidden_size).uniform_(-1, 1).cuda()
+        ws_scale = None
         w1, ws_scale = ops.scaled_fp8_quant(
             w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device)
         )
-        w2_f32 = torch.ones(experts, hidden_size, intermediate_size).uniform_(-1, 1).cuda()
+        w2_f32 = torch.randn(experts, hidden_size, intermediate_size).uniform_(-1, 1).cuda()
+        w2s_scale = None
         w2, w2s_scale = ops.scaled_fp8_quant(
             w2_f32.half(), torch.ones(experts, dtype=torch.float32, device=w2_f32.device)
         )
         fused_moe_f = ampere_fp8_fused_moe_large_tokens.fused_moe
-    else:
-        w1 = torch.randn(experts, intermediate_size * 2, hidden_size).cuda().half()
-        w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().half()
-        ws_scale = None
-        w2s_scale = None
-        fused_moe_f = fused_moe.fused_moe
 
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_state.half(), gatew).float()
@@ -172,7 +168,10 @@ def moe_perf(
         routing_func=sparsemixer
     )
 
-    torch.testing.assert_close(r1, r2, rtol=1e-0, atol=1e-1)
+    print(r1)
+    print(r2)
+
+    torch.testing.assert_close(r1, r2, rtol=1e-2, atol=1e-3)
 
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
 intermediate_size = 6400

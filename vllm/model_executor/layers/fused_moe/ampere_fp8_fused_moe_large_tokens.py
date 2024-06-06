@@ -130,8 +130,8 @@ def fused_moe(
         4,
     )
 
-    #ggemm_kernel_1 = grouped_gemm_kernel.grouped_gemm(M, N, K, with_scaling=True)
-    #ggemm_kernel_2 = grouped_gemm_kernel.grouped_gemm(M, K, N // 2, with_scaling=True)
+    ggemm_kernel_1 = grouped_gemm_kernel.grouped_gemm(M, N, K, with_scaling=True)
+    ggemm_kernel_2 = grouped_gemm_kernel.grouped_gemm(M, K, N // 2, with_scaling=True)
 
     gathered_cache_1 = torch.empty(
         (sorted_token_ids.size(0), N),
@@ -159,35 +159,12 @@ def fused_moe(
         c = gathered_cache_1[start:end, :]
         scale = g_w1_scale[i, :]
 
-        #ggemm_kernel_1.forward(
-        #    a, w, scale=scale, output=c
-        #)
-
-        w_t = w.t().to(torch.float16)
-        torch.mm(a, w_t*scale, out=c)
+        ggemm_kernel_1.forward(
+            a, w, scale=scale, output=c
+        )
 
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
-    
-    debug_scatter_cache = torch.empty(
-        (M, topk, N//2),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
-    )
-
-    gather_scatter_kernel.invoke_moe_scatter(
-        gathered_cache_2,
-        debug_scatter_cache.view(-1, N//2),
-        sorted_token_ids,
-        num_tokens_post_padded,
-        topk_ids,
-        block_m,
-        block_k,
-        topk,
-        splitk,
-    )
-
-    return debug_scatter_cache.to(hidden_states_dtype).view(M*topk, N//2)
-
+ 
     for i in range(0, E):
         start = expert_off[i]
         end = expert_off[i] + expert_length[i]
@@ -197,9 +174,9 @@ def fused_moe(
         c = gathered_cache_3[start:end, :]
         scale = g_w2_scale[i, :]
 
-        #ggemm_kernel_2.forward(
-        #    a, w, scale=scale,output=c
-        #)
+        ggemm_kernel_2.forward(
+            a, w, scale=scale,output=c
+        )
 
     gather_scatter_kernel.invoke_moe_scatter(
         gathered_cache_3,
