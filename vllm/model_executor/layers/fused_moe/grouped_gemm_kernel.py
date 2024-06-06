@@ -110,18 +110,33 @@ def test_matmul_torch_forward_fp8e4m3(SplitK, M, N, K, A_dtype, W_dtype, accum_d
     numpytype_a = map_torch_type(A_dtype)
     numpytype_b = map_torch_type(W_dtype)
 
-    scale = torch.ones(N).type(numpytype_a).cuda()  * 0.0022
-
     torch_a = torch.rand(M * K).uniform_(-1, 1).reshape(input_shape).type(numpytype_a).cuda()
     torch_b = torch.rand(N * K).uniform_(-1, 1).reshape(weight_shape).type(numpytype_b).cuda()
     ref_out = torch.matmul(torch_a.to(torch.float32),
                            torch_b.t().to(torch.float32)) if layout == "nt" else torch.matmul(
                                torch_a.to(torch.float32), torch_b.to(torch.float32))
-    ref_out = ref_out * scale
     ref_out = ref_out.to(torch.float16)
+
+    # !pip install vllm
+    from vllm import _custom_ops as ops
+
+    b, b_scale = ops.scaled_fp8_quant(
+        torch_b.to(torch.float32).bfloat16(), torch.ones(1).cuda() * 0.0022
+    )
+
+    b_scale = b_scale.expand(N)
+    one_scale = torch.ones(N).cuda()
+
     bitblas_out = torch.empty_like(ref_out)
-    matmul.forward(torch_a, torch_b, scale=scale, output=bitblas_out)
+    matmul.forward(torch_a, torch_b, scale=one_scale.to(torch_a.dtype), output=bitblas_out)
     print("torch_ref_out", ref_out)
     print("bitblas_out", bitblas_out)
 
     torch.testing.assert_close(bitblas_out, ref_out, rtol=1e0, atol=1e-1)
+
+    matmul.forward(torch_a, b, scale=b_scale.to(torch_a.dtype), output=bitblas_out)
+
+    print("torch_ref_out", ref_out)
+    print("bitblas_out", bitblas_out)
+    torch.testing.assert_close(bitblas_out, ref_out, rtol=1e0, atol=1e-1)
+
