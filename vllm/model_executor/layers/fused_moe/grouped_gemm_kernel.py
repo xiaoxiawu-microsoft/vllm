@@ -50,4 +50,5 @@ def grouped_gemm(
         bitblas_matmul = MatmulWithSplitK(config=matmul_config, enable_tuning=False)
         global_operator_cache.add(matmul_config, bitblas_matmul)
         global_operator_cache.save_into_database(BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
+        print("New operator added to the database")
     return bitblas_matmul
