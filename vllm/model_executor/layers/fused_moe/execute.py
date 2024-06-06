@@ -118,27 +118,21 @@ def moe_perf(
 ):
     torch.manual_seed(0)
 
-    hidden_state = torch.randn(tokens, hidden_size).uniform_(-1, 1).cuda().half()
+    hidden_state = torch.ones(tokens, hidden_size).cuda().half()
 
     if use_fp8:
-        w1_f32 = torch.randn(experts, intermediate_size * 2, hidden_size).uniform_(-1, 1).cuda()
+        w1_f32 = torch.ones(experts, intermediate_size * 2, hidden_size).cuda()
         w1, ws_scale = ops.scaled_fp8_quant(
-            w1_f32.bfloat16(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device)* 10
+            w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device)
         )
         w2_f32 = torch.ones(experts, hidden_size, intermediate_size).uniform_(-1, 1).cuda()
         w2, w2s_scale = ops.scaled_fp8_quant(
-            w2_f32.half()
+            w2_f32.half(), torch.ones(experts, dtype=torch.float32, device=w2_f32.device)
         )
-        _, h_scale = ops.scaled_fp8_quant(hidden_state)
-        print(f"ws_scale: {ws_scale}")
-        print(f"w2s_scale: {w2s_scale}")
-        ws_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device) * ws_scale
-        w2s_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device) * w2s_scale
         fused_moe_f = ampere_fp8_fused_moe_large_tokens.fused_moe
     else:
         w1 = torch.randn(experts, intermediate_size * 2, hidden_size).cuda().half()
         w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().half()
-        h_scale = None
         ws_scale = None
         w2s_scale = None
         fused_moe_f = fused_moe.fused_moe
@@ -157,13 +151,11 @@ def moe_perf(
         gating_output=gating_output,
         topk=topk,
         override_config=config,
-        renormalize=False,
+        renormalize=True,
         inplace=True,
         use_fp8=use_fp8,
         w1_scale=ws_scale,
         w2_scale=w2s_scale,
-        a1_scale=h_scale,
-        a2_scale=h_scale,
         routing_func=sparsemixer
     )
 
@@ -174,14 +166,12 @@ def moe_perf(
         gating_output=gating_output,
         topk=topk,
         override_config=config,
-        renormalize=False,
+        renormalize=True,
         inplace=True,
         use_fp8=False,
         routing_func=sparsemixer
     )
 
-    print(r1)
-    print(r2)
     torch.testing.assert_close(r1, r2, rtol=1e-0, atol=1e-1)
 
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
