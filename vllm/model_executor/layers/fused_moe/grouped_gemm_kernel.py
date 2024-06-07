@@ -22,14 +22,14 @@ def grouped_gemm(
     with_scaling=False,
     with_zeros=False,
     zeros_mode=None,
-    SplitK=4,
+    SplitK=8,
 ):
     if global_operator_cache.size() == 0:
         global_operator_cache.load_from_database(BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
 
     matmul_config = MatmulConfigWithSplitK(
         k_split=SplitK,
-        M=[16],
+        M=[1, 16, 32, 64, 128],
         N=N,
         K=K,
         A_dtype=A_dtype,
@@ -48,7 +48,7 @@ def grouped_gemm(
     bitblas_matmul = global_operator_cache.get(matmul_config)
 
     if bitblas_matmul is None:
-        bitblas_matmul = MatmulWithSplitK(config=matmul_config, enable_tuning=False)
+        bitblas_matmul = MatmulWithSplitK(config=matmul_config, enable_tuning=True)
         global_operator_cache.add(matmul_config, bitblas_matmul)
         global_operator_cache.save_into_database(BITBLAS_DATABASE_PATH, BITBLAS_TARGET)
         print("New operator added to the database")
@@ -69,7 +69,7 @@ def test_matmul_torch_forward_fp8e4m3(SplitK, M, N, K, A_dtype, W_dtype, accum_d
     torch.random.manual_seed(0)
     matmul_config = MatmulConfigWithSplitK(
         k_split=SplitK,
-        M=[1, 16],
+        M=[1, 16, 32, 64, 128],
         N=N,
         K=K,
         A_dtype=A_dtype,

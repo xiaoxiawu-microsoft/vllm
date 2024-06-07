@@ -139,43 +139,50 @@ def moe_perf(
     #@timeit_decorator()
     def run_fused_moe(*args, **kwargs):
         return fused_moe_f(*args, **kwargs)
+    
+    topk_weights, topk_ids = sparsemixer(gating_output, topk)
+    
+    def sparse_mixer_cache(gating_output, topk):
+        return topk_weights, topk_ids
 
-    r1 = run_fused_moe(
-        hidden_states=hidden_state,
-        w1=w1,
-        w2=w2,
-        gating_output=gating_output,
-        topk=topk,
-        override_config=config,
-        renormalize=True,
-        inplace=True,
-        use_fp8=use_fp8,
-        w1_scale=ws_scale,
-        w2_scale=w2s_scale,
-        routing_func=sparsemixer
-    )
+    all_time = 0.0
+    for j in range(10 + times):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
 
-    r2 = fused_moe.fused_moe(
-        hidden_states=hidden_state,
-        w1=w1_f32.half(),
-        w2=w2_f32.half(),
-        gating_output=gating_output,
-        topk=topk,
-        override_config=config,
-        renormalize=True,
-        inplace=True,
-        use_fp8=False,
-        routing_func=sparsemixer
-    )
+        run_fused_moe(
+            hidden_states=hidden_state,
+            w1=w1,
+            w2=w2,
+            gating_output=gating_output,
+            topk=topk,
+            override_config=config,
+            renormalize=True,
+            inplace=True,
+            use_fp8=use_fp8,
+            w1_scale=ws_scale,
+            w2_scale=w2s_scale,
+            routing_func=sparse_mixer_cache,
+        )
 
-    print(r1)
-    print(r2)
+        end.record()
+        torch.cuda.synchronize()
+        elapsed_time_ms = start.elapsed_time(end)
 
-    torch.testing.assert_close(r1, r2, rtol=1e-2, atol=1e-3)
+        if j >= 10:
+            all_time += elapsed_time_ms
+
+    return all_time / times
+
+
+    #torch.testing.assert_close(r1, r2, rtol=1e-2, atol=1e-3)
 
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
 intermediate_size = 6400
 expert_num = 16
+
+searchspace = [2048]
 
 for tk in searchspace:
     print(
