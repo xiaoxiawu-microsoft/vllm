@@ -61,8 +61,9 @@ def is_sm80(device_id=0):
     return (device_properties.major == 8 and device_properties.minor == 0)
 
 if is_sm80():
-    from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe_large_tokens
-    fused_moe_a100 = ampere_fp8_fused_moe_large_tokens.fused_moe
+    import pycublas.trtllm_moe_grouped_gemm as moe_kernel
+    from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe
+    fused_moe_a100 = ampere_fp8_fused_moe.fused_moe
     
 logger = logging.get_logger(__name__)
 
@@ -361,6 +362,12 @@ class PhiMoE(nn.Module):
 
             #remove_subnormal_fp8(ws.view(torch.uint8))
             #remove_subnormal_fp8(w2s.view(torch.uint8))
+
+            if self.apply_a100_fp8:
+                ws = moe_kernel.preprocess_weights_for_mixed_gemm(ws.t().contiguous().cpu()).to(w2s.device)
+                w2s = moe_kernel.preprocess_weights_for_mixed_gemm(w2s.t().contiguous().cpu()).to(ws.device)
+                self.ws_scale = self.ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, ws.size(-1)).contiguous()
+                self.w2s_scale = self.w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2s.size(-1)).contiguous()
 
             self.ws = nn.Parameter(ws.to("cuda"), requires_grad=False)
             self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)

@@ -8,7 +8,6 @@ import os
 import shutil
 
 import fused_moe
-import ampere_fp8_fused_moe_large_tokens
 import ampere_fp8_fused_moe
 
 
@@ -121,17 +120,21 @@ def moe_perf(
     hidden_state = torch.randn(tokens, hidden_size).uniform_(-1, 1).cuda().half()
 
     if use_fp8:
-        w1_f32 = torch.randn(experts, intermediate_size * 2, hidden_size).uniform_(-1, 1).cuda()
+        w1_f32 = torch.randn(experts, hidden_size, intermediate_size * 2).uniform_(-1, 1).cuda()
         ws_scale = None
         w1, ws_scale = ops.scaled_fp8_quant(
             w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device)
         )
-        w2_f32 = torch.randn(experts, hidden_size, intermediate_size).uniform_(-1, 1).cuda()
+        w2_f32 = torch.randn(experts, intermediate_size, hidden_size).uniform_(-1, 1).cuda()
         w2s_scale = None
         w2, w2s_scale = ops.scaled_fp8_quant(
             w2_f32.half(), torch.ones(experts, dtype=torch.float32, device=w2_f32.device)
         )
-        fused_moe_f = ampere_fp8_fused_moe_large_tokens.fused_moe
+        fused_moe_f = ampere_fp8_fused_moe.fused_moe
+
+        ws_scale = ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w1_f32.size(-1)).contiguous()
+        w2s_scale = w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2_f32.size(-1)).contiguous()
+
 
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_state.half(), gatew).float()
