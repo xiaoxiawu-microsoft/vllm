@@ -157,7 +157,7 @@ def fused_moe(
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
     
-    hidden_states = torch.cat((hidden_states, torch.empty((E//topk, K), dtype=hidden_states_dtype, device=hidden_states.device)), dim=0)
+    hidden_states = torch.cat((hidden_states, torch.empty((E//topk, K), dtype=hidden_states.dtype, device=hidden_states.device)), dim=0)
     topk_weights = torch.cat((topk_weights, torch.empty((E//topk, topk), dtype=topk_weights.dtype, device=topk_weights.device)), dim=0)
     topk_ids = torch.cat((topk_ids, torch.arange(0,E,1, dtype=topk_ids.dtype, device=topk_ids.device).view((E//topk, topk))), dim=0)
 
@@ -208,7 +208,7 @@ def fused_moe(
         dtype=hidden_states.dtype,
     )
 
-    total_rows_before_expert = expert_off
+    total_rows_before_expert = expert_off[:E]
 
     fc1_cfg_id = moe_kernel_cfg[K][
         min(
@@ -224,7 +224,7 @@ def fused_moe(
     ]
 
     moe_kernel.grouped_gemm(
-        gathered_cache,
+        gathered_cache.view(torch.float16),
         w1.view(torch.int8),
         w1_scale.to(hidden_states.dtype),
         total_rows_before_expert,
@@ -255,7 +255,7 @@ def fused_moe(
 
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
     moe_kernel.grouped_gemm(
-       gathered_cache_2,
+       gathered_cache_2.view(torch.float16),
        w2.view(torch.int8),
        w2_scale.view(hidden_states.dtype),
        total_rows_before_expert,
@@ -277,10 +277,10 @@ def fused_moe(
         topk_weights=topk_weights,
     )
 
-    intermediate_cache3 = intermediate_cache3[:M*topk,:].to(hidden_states_dtype)
+    intermediate_cache3 = intermediate_cache3[:M,:,:].to(hidden_states_dtype)
 
     if inplace:
-        hidden_states = hidden_states[:M*topk, :].view(dtype=hidden_states_dtype)
+        hidden_states = hidden_states[:M, :].view(dtype=hidden_states_dtype)
         return torch.sum(
             intermediate_cache3.view(*intermediate_cache3.shape),
             dim=1,
