@@ -260,6 +260,7 @@ class PhiMoE(nn.Module):
         # quantization schemes
         self.use_fp8 = isinstance(quant_config, Fp8Config)
         self.apply_a100_fp8 = is_sm80() and self.use_fp8
+        self.remove_subnormal_fp8 = False
         
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -348,22 +349,25 @@ class PhiMoE(nn.Module):
                 w2s[expert, :, :], self.w2s_scale[
                     expert] = ops.scaled_fp8_quant(self.w2s.data[expert, :, :])
 
-            def remove_subnormal_fp8(tensor):
-                assert tensor.dtype == torch.uint8, "Tensor must be a byte tensor representing fp8 values"
-                exponent_mask = 0b11111000
-                mantissa_mask = 0b00000111
-                exponents = (tensor & exponent_mask) >> 3
-                mantissas = tensor & mantissa_mask
-                subnormal_mask = (exponents == 0) & (mantissas != 0)
-                if subnormal_mask.any():
-                    print(subnormal_mask.sum().item() / subnormal_mask.numel() * 100, "% of values are subnormal")
-                tensor[subnormal_mask] = 0
-                return subnormal_mask.any()
+            if self.apply_a100_fp8 and self.remove_subnormal_fp8:
+                print_warning_once("Removing FP8 subnormal values from weights")
+                def remove_subnormal_fp8(tensor):
+                    assert tensor.dtype == torch.uint8, "Tensor must be a byte tensor representing fp8 values"
+                    exponent_mask = 0b11111000
+                    mantissa_mask = 0b00000111
+                    exponents = (tensor & exponent_mask) >> 3
+                    mantissas = tensor & mantissa_mask
+                    subnormal_mask = (exponents == 0) & (mantissas != 0)
+                    if subnormal_mask.any():
+                        print(subnormal_mask.sum().item() / subnormal_mask.numel() * 100, "% of values are subnormal")
+                    tensor[subnormal_mask] = 0
+                    return subnormal_mask.any()
 
-            #remove_subnormal_fp8(ws.view(torch.uint8))
-            #remove_subnormal_fp8(w2s.view(torch.uint8))
+                remove_subnormal_fp8(ws.view(torch.uint8))
+                remove_subnormal_fp8(w2s.view(torch.uint8))
 
-            if self.apply_a100_fp8:
+            if is_sm80():
+                print_warning_once("Preprocessing weights for A100 FP8 fused MoE")
                 ws = moe_kernel.preprocess_weights_for_mixed_gemm(ws.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w2s.device)
                 w2s = moe_kernel.preprocess_weights_for_mixed_gemm(w2s.view(torch.int8).transpose(1,2).contiguous().cpu()).to(ws.device)
                 self.ws_scale = nn.Parameter(self.ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, ws.size(-1)).contiguous(), requires_grad=False)

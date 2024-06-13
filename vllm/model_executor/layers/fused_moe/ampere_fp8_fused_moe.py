@@ -226,7 +226,7 @@ def fused_moe(
     moe_kernel.grouped_gemm(
         gathered_cache,
         w1.view(torch.int8),
-        w1_scale,
+        w1_scale.to(hidden_states.dtype),
         total_rows_before_expert,
         gathered_cache_1,
         5,
@@ -257,7 +257,7 @@ def fused_moe(
     moe_kernel.grouped_gemm(
        gathered_cache_2,
        w2.view(torch.int8),
-       w2_scale,
+       w2_scale.view(hidden_states.dtype),
        total_rows_before_expert,
        gathered_cache_3,
        5,
