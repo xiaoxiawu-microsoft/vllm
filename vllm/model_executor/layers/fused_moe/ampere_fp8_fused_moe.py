@@ -117,7 +117,13 @@ def moe_align_block_size(
         expert_off,
         expert_length,
     )
-    return sorted_ids, expert_ids, num_tokens_post_pad, expert_off.to(torch.int64), expert_length
+    return (
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        expert_off.to(torch.int64),
+        expert_length,
+    )
 
 
 def fused_moe(
@@ -135,11 +141,12 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     routing_func: Callable = torch.topk,
+    cfg_id=20,
 ) -> torch.Tensor:
     # Check constraints.
     M, K = hidden_states.shape
     E, _, N = w1.shape
-    block_m = 128
+    block_m = 16
     block_k = 128
     splitk = 4
 
@@ -198,15 +205,37 @@ def fused_moe(
 
     total_rows_before_expert = expert_off
 
-    fc1_cfg_id = moe_kernel_cfg[K][min(moe_kernel_cfg[K].keys(), key=lambda x: abs(x - sorted_token_ids.size(0)//32))]
-    fc2_cfg_id = moe_kernel_cfg[N//2][min(moe_kernel_cfg[N//2].keys(), key=lambda x: abs(x - sorted_token_ids.size(0)//32))]
+    fc1_cfg_id = moe_kernel_cfg[K][
+        min(
+            moe_kernel_cfg[K].keys(),
+            key=lambda x: abs(x - sorted_token_ids.size(0) // 16),
+        )
+    ]
+    fc2_cfg_id = moe_kernel_cfg[N // 2][
+        min(
+            moe_kernel_cfg[N // 2].keys(),
+            key=lambda x: abs(x - sorted_token_ids.size(0) // 16),
+        )
+    ]
 
     moe_kernel.grouped_gemm(
-        gathered_cache, w1.view(torch.int8), w1_scale, total_rows_before_expert, gathered_cache_1, 5, fc1_cfg_id
+        gathered_cache,
+        w1.view(torch.int8),
+        w1_scale,
+        total_rows_before_expert,
+        gathered_cache_1,
+        5,
+        cfg_id,
     )
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
     moe_kernel.grouped_gemm(
-        gathered_cache_2, w2.view(torch.int8), w2_scale, total_rows_before_expert, gathered_cache_3, 5, fc2_cfg_id
+       gathered_cache_2,
+       w2.view(torch.int8),
+       w2_scale,
+       total_rows_before_expert,
+       gathered_cache_3,
+       5,
+       fc2_cfg_id,
     )
 
     gather_scatter_kernel.invoke_moe_scatter(
