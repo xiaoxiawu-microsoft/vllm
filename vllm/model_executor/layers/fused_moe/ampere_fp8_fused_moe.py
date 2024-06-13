@@ -127,7 +127,7 @@ def moe_align_block_size(
 
 
 def fused_moe(
-    hidden_states: torch.Tensor,
+    activation: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     gating_output: torch.Tensor,
@@ -143,30 +143,23 @@ def fused_moe(
     routing_func: Callable = torch.topk,
     cfg_id=20,
 ) -> torch.Tensor:
+    hidden_states_dtype = activation.dtype
+    hidden_states = activation.to(torch.float16)
+
     # Check constraints.
     M, K = hidden_states.shape
     E, _, N = w1.shape
     block_m = 16
     block_k = 128
-    splitk = 4
-    ME = M + E // topk
 
-    hidden_states_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float16)
-
-    if routing_func != torch.topk:
-        topk_weights, topk_ids = routing_func(gating_output, topk)
-    
-    hidden_states = torch.cat((hidden_states, torch.empty((E//topk, K), dtype=hidden_states.dtype, device=hidden_states.device)), dim=0)
-    topk_weights = torch.cat((topk_weights, torch.empty((E//topk, topk), dtype=topk_weights.dtype, device=topk_weights.device)), dim=0)
-    topk_ids = torch.cat((topk_ids, torch.arange(0,E,1, dtype=topk_ids.dtype, device=topk_ids.device).view((E//topk, topk))), dim=0)
+    topk_weights, topk_ids = routing_func(gating_output, topk)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded, expert_off, expert_length = (
         moe_align_block_size(topk_ids, block_m, E)
     )
 
     intermediate_cache3 = torch.empty(
-        (ME, topk, K),
+        (M, topk, K),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
@@ -175,19 +168,6 @@ def fused_moe(
         (sorted_token_ids.size(0), K),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
-    )
-
-    # hidden states -> sorted hidden states
-    gather_scatter_kernel.invoke_moe_gather(
-        hidden_states,
-        gathered_cache,
-        sorted_token_ids,
-        num_tokens_post_padded,
-        topk_ids,
-        block_m,
-        block_k,
-        topk,
-        4,
     )
 
     gathered_cache_1 = torch.empty(
@@ -208,52 +188,33 @@ def fused_moe(
         dtype=hidden_states.dtype,
     )
 
-    total_rows_before_expert = expert_off[:E]
+    # hidden states -> sorted hidden states
+    gather_scatter_kernel.invoke_moe_gather(
+        hidden_states,
+        gathered_cache,
+        sorted_token_ids,
+        num_tokens_post_padded,
+        topk_ids,
+        block_m,
+        block_k,
+        topk,
+        4,
+    )
 
-    fc1_cfg_id = moe_kernel_cfg[K][
-        min(
-            moe_kernel_cfg[K].keys(),
-            key=lambda x: abs(x - sorted_token_ids.size(0) // 16),
-        )
-    ]
-    fc2_cfg_id = moe_kernel_cfg[N // 2][
-        min(
-            moe_kernel_cfg[N // 2].keys(),
-            key=lambda x: abs(x - sorted_token_ids.size(0) // 16),
-        )
-    ]
+    total_rows_before_expert = expert_off[1:]
 
     moe_kernel.grouped_gemm(
-        gathered_cache.view(torch.float16),
-        w1.view(torch.int8),
-        w1_scale.to(hidden_states.dtype),
+        gathered_cache,
+        w1,
+        w1_scale,
         total_rows_before_expert,
         gathered_cache_1,
         5,
         cfg_id,
     )
 
-    # ret_gathered_cache_1 = torch.empty(
-    #     (ME, 2, N),
-    #     device=hidden_states.device,
-    #     dtype=hidden_states.dtype,
-    # )
-
-    # gather_scatter_kernel.invoke_moe_scatter(
-    #     gathered_cache_1,
-    #     ret_gathered_cache_1.view(-1, N),
-    #     sorted_token_ids,
-    #     num_tokens_post_padded,
-    #     topk_ids,
-    #     block_m,
-    #     block_k,
-    #     topk,
-    #     splitk,
-    # )
-
-    # return ret_gathered_cache_1
-
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
+
     moe_kernel.grouped_gemm(
        gathered_cache_2.view(torch.float16),
        w2.view(torch.int8),
@@ -273,17 +234,16 @@ def fused_moe(
         block_m,
         block_k,
         topk,
-        splitk,
+        4,
         topk_weights=topk_weights,
     )
 
     intermediate_cache3 = intermediate_cache3[:M,:,:].to(hidden_states_dtype)
 
     if inplace:
-        hidden_states = hidden_states[:M, :].view(dtype=hidden_states_dtype)
         return torch.sum(
             intermediate_cache3.view(*intermediate_cache3.shape),
             dim=1,
-            out=hidden_states,
+            out=activation,
         )
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape), dim=1)

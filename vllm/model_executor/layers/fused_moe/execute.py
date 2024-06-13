@@ -106,10 +106,9 @@ def sparsemixer(scores, top_k, jitter_eps=0.01):
 
 
 def moe_perf(
-    tokens=1024,
-    experts=8,
+    experts=2,
     topk=2,
-    intermediate_size=14336,
+    intermediate_size=6400,
     hidden_size=4096,
     config=None,
     times=100,
@@ -117,41 +116,35 @@ def moe_perf(
 ):
     torch.manual_seed(0)
 
-    if use_fp8:
-        w1_f32 = torch.ones(experts, hidden_size, intermediate_size * 2).cuda()
-        ws_scale = None
-        w1, ws_scale = ops.scaled_fp8_quant(
-            w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device) * 0.0022
-        )
-        w2_f32 = torch.ones(experts, intermediate_size, hidden_size).cuda()
-        w2s_scale = None
-        w2, w2s_scale = ops.scaled_fp8_quant(
-            w2_f32.half(), torch.ones(experts, dtype=torch.float32, device=w2_f32.device) * 0.0022
-        )
-        fused_moe_f = ampere_fp8_fused_moe.fused_moe
-
-        ws_scale = ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w1_f32.size(-1)).contiguous()
-        w2s_scale = w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2_f32.size(-1)).contiguous()
-
-    def run_fused_moe(*args, **kwargs):
-        return fused_moe_f(*args, **kwargs)
+    w1_f32 = torch.ones(experts, hidden_size, intermediate_size * 2).cuda()
+    w1 = torch.empty(experts, hidden_size, intermediate_size * 2, dtype=torch.float8_e4m3fn , device=w1_f32.device)
+    ws_scale = torch.empty(experts, dtype=torch.float32, device=w1_f32.device)
+    for i in range(experts):
+        w1[i, :, :], ws_scale[i] = ops.scaled_fp8_quant(w1_f32[i, :, :].half())
     
-    
+    w2 = torch.ones(experts, intermediate_size, hidden_size, dtype=torch.float8_e4m3fn, device=w1_f32.device)
+    w2s_scale = torch.empty(experts, dtype=torch.float32, device=w1_f32.device)
+    w2_f32 = torch.ones(experts, intermediate_size, hidden_size).cuda()
+    for i in range(experts):
+        w2[i, :, :], w2s_scale[i] = ops.scaled_fp8_quant(w2_f32[i, :, :].half())
+
+    ws_scale = ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w1_f32.size(-1)).contiguous()
+    w2s_scale = w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2_f32.size(-1)).contiguous()
+
     searchspace = list(range(32, 256, 32)) + list(range(256, 4097, 256))
-    searchspace = [32]
-    best_configs = dict()
+    searchspace = [1]
     for tokens in searchspace:
-        hidden_state = torch.ones(tokens, hidden_size).uniform_(-1, 1).cuda().half()
+        hidden_state = torch.ones(tokens, hidden_size).cuda().uniform_(-1,1).half()
         gatew = torch.randn(hidden_size, experts).cuda().half()
         gating_output = torch.matmul(hidden_state.half(), gatew).float()
         topk_weights, topk_ids = sparsemixer(gating_output, topk)
         def sparse_mixer_cache(gating_output, topk):
             return topk_weights, topk_ids
 
-        o0 = fused_moe_f(
-            hidden_states=hidden_state,
-            w1=w1,
-            w2=w2,
+        o0 = ampere_fp8_fused_moe.fused_moe(
+            hidden_state,
+            w1=w1.view(torch.int8),
+            w2=w2.view(torch.int8),
             gating_output=gating_output,
             topk=topk,
             override_config=config,
@@ -165,29 +158,20 @@ def moe_perf(
         print(o0)
 
         o1 = fused_moe.fused_moe(
-            hidden_states=hidden_state,
+            hidden_state,
             w1=w1_f32.half().transpose(1,2).contiguous(),
             w2=w2_f32.half().transpose(1,2).contiguous(),
             gating_output=gating_output,
             topk=topk,
             override_config=config,
             renormalize=True,
-            inplace=True,
+            inplace=False,
             use_fp8=False,
             routing_func=sparse_mixer_cache,
         )
 
         print(o1)
 
-searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
-intermediate_size = 6400
-expert_num = 16
+        torch.testing.assert_close(o0, o1, rtol=1e-0, atol=1e-1)
 
-searchspace = [2048]
-
-for tk in searchspace:
-    print(
-        tk,
-        ",",
-        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=True),
-    )
+moe_perf()
