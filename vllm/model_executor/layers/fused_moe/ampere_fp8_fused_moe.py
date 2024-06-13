@@ -141,7 +141,8 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     routing_func: Callable = torch.topk,
-    cfg_id=20,
+    cfg_id_0=20,
+    cfg_id_1=20,
 ) -> torch.Tensor:
     hidden_states_dtype = activation.dtype
     hidden_states = activation.to(torch.float16)
@@ -210,7 +211,7 @@ def fused_moe(
         total_rows_before_expert,
         gathered_cache_1,
         5,
-        cfg_id,
+        cfg_id_0,
     )
 
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
@@ -222,7 +223,7 @@ def fused_moe(
        total_rows_before_expert,
        gathered_cache_3,
        5,
-       cfg_id,
+       cfg_id_1,
     )
 
     gather_scatter_kernel.invoke_moe_scatter(

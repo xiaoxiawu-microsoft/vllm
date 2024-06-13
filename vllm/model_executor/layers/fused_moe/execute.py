@@ -106,7 +106,7 @@ def sparsemixer(scores, top_k, jitter_eps=0.01):
 
 
 def moe_perf(
-    experts=2,
+    experts=16,
     topk=2,
     intermediate_size=6400,
     hidden_size=4096,
@@ -131,8 +131,9 @@ def moe_perf(
     ws_scale = ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w1_f32.size(-1)).contiguous()
     w2s_scale = w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2_f32.size(-1)).contiguous()
 
-    searchspace = list(range(32, 256, 32)) + list(range(256, 4097, 256))
-    searchspace = [1]
+    # searchspace = list(range(32, 256, 32)) + list(range(256, 4097, 256))
+    searchspace = list(range(1792, 4097, 256))
+    best_configs = dict()
     for tokens in searchspace:
         hidden_state = torch.ones(tokens, hidden_size).cuda().uniform_(-1,1).half()
         gatew = torch.randn(hidden_size, experts).cuda().half()
@@ -140,38 +141,51 @@ def moe_perf(
         topk_weights, topk_ids = sparsemixer(gating_output, topk)
         def sparse_mixer_cache(gating_output, topk):
             return topk_weights, topk_ids
+        
+        min_time = 1000000.0
+        min_cfg_id_0 = 0
+        min_cfg_id_1 = 0
 
-        o0 = ampere_fp8_fused_moe.fused_moe(
-            hidden_state,
-            w1=w1.view(torch.int8),
-            w2=w2.view(torch.int8),
-            gating_output=gating_output,
-            topk=topk,
-            override_config=config,
-            renormalize=True,
-            inplace=False,
-            use_fp8=use_fp8,
-            w1_scale=ws_scale,
-            w2_scale=w2s_scale,
-            routing_func=sparse_mixer_cache,
-        )
-        print(o0)
+        for cfg_id_0 in range(20, 30):
+            for cfg_id_1 in range(20, 30):
+                all_time = 0.0
+                for j in range(10 + times):
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
 
-        o1 = fused_moe.fused_moe(
-            hidden_state,
-            w1=w1_f32.half().transpose(1,2).contiguous(),
-            w2=w2_f32.half().transpose(1,2).contiguous(),
-            gating_output=gating_output,
-            topk=topk,
-            override_config=config,
-            renormalize=True,
-            inplace=False,
-            use_fp8=False,
-            routing_func=sparse_mixer_cache,
-        )
+                    o0 = ampere_fp8_fused_moe.fused_moe(
+                        hidden_state,
+                        w1=w1.view(torch.int8),
+                        w2=w2.view(torch.int8),
+                        gating_output=gating_output,
+                        topk=topk,
+                        override_config=config,
+                        renormalize=True,
+                        inplace=False,
+                        use_fp8=use_fp8,
+                        w1_scale=ws_scale,
+                        w2_scale=w2s_scale,
+                        routing_func=sparse_mixer_cache,
+                        cfg_id_0=cfg_id_0,
+                        cfg_id_1=cfg_id_1
+                    )
 
-        print(o1)
+                    end.record()
+                    torch.cuda.synchronize()
+                    elapsed_time_ms = start.elapsed_time(end)
 
-        torch.testing.assert_close(o0, o1, rtol=1e-0, atol=1e-1)
+                    if j >= 10:
+                        all_time += elapsed_time_ms
+
+                if all_time/times > 0.01 and all_time < min_time:
+                    min_time = all_time
+                    min_cfg_id_0 = cfg_id_0
+                    min_cfg_id_1 = cfg_id_1
+                    print(f"new config id > {tokens}, {cfg_id_0}, {cfg_id_1}, {all_time/times:.3f}")
+            
+        best_configs[tokens] = min_cfg_id_0, min_cfg_id_1, min_time / times
+    
+    print(best_configs)
 
 moe_perf()
