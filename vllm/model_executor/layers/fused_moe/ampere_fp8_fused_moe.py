@@ -235,7 +235,7 @@ def fused_moe(
        total_rows_before_expert,
        gathered_cache_3,
        5,
-       fc2_cfg_id,
+       cfg_id,
     )
 
     gather_scatter_kernel.invoke_moe_scatter(
