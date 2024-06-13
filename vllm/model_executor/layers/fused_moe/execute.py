@@ -117,86 +117,67 @@ def moe_perf(
 ):
     torch.manual_seed(0)
 
-    hidden_state = torch.randn(tokens, hidden_size).uniform_(-1, 1).cuda().half()
-
     if use_fp8:
-        w1_f32 = torch.randn(experts, hidden_size, intermediate_size * 2).uniform_(-1, 1).cuda()
+        w1_f32 = torch.ones(experts, hidden_size, intermediate_size * 2).cuda()
         ws_scale = None
         w1, ws_scale = ops.scaled_fp8_quant(
-            w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device)
+            w1_f32.half(), torch.ones(experts, dtype=torch.float32, device=w1_f32.device) * 0.0022
         )
-        w2_f32 = torch.randn(experts, intermediate_size, hidden_size).uniform_(-1, 1).cuda()
+        w2_f32 = torch.ones(experts, intermediate_size, hidden_size).cuda()
         w2s_scale = None
         w2, w2s_scale = ops.scaled_fp8_quant(
-            w2_f32.half(), torch.ones(experts, dtype=torch.float32, device=w2_f32.device)
+            w2_f32.half(), torch.ones(experts, dtype=torch.float32, device=w2_f32.device) * 0.0022
         )
         fused_moe_f = ampere_fp8_fused_moe.fused_moe
 
         ws_scale = ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w1_f32.size(-1)).contiguous()
         w2s_scale = w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2_f32.size(-1)).contiguous()
 
-
-    gatew = torch.randn(hidden_size, experts).cuda().half()
-    gating_output = torch.matmul(hidden_state.half(), gatew).float()
-
-    @timeit_decorator()
     def run_fused_moe(*args, **kwargs):
         return fused_moe_f(*args, **kwargs)
     
-    topk_weights, topk_ids = sparsemixer(gating_output, topk)
-    
-    def sparse_mixer_cache(gating_output, topk):
-        return topk_weights, topk_ids
     
     searchspace = list(range(32, 256, 32)) + list(range(256, 4097, 256))
-    searchspace = [2048]
+    searchspace = [32]
     best_configs = dict()
     for tokens in searchspace:
-        # input output
-        min_time = 1000000.0
-        min_cfg_id = 0
+        hidden_state = torch.ones(tokens, hidden_size).uniform_(-1, 1).cuda().half()
+        gatew = torch.randn(hidden_size, experts).cuda().half()
+        gating_output = torch.matmul(hidden_state.half(), gatew).float()
+        topk_weights, topk_ids = sparsemixer(gating_output, topk)
+        def sparse_mixer_cache(gating_output, topk):
+            return topk_weights, topk_ids
 
-        for cfg_id in range(0, 30):
-            all_time = 0.0
-            for j in range(10 + times):
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
+        o0 = fused_moe_f(
+            hidden_states=hidden_state,
+            w1=w1,
+            w2=w2,
+            gating_output=gating_output,
+            topk=topk,
+            override_config=config,
+            renormalize=True,
+            inplace=False,
+            use_fp8=use_fp8,
+            w1_scale=ws_scale,
+            w2_scale=w2s_scale,
+            routing_func=sparse_mixer_cache,
+        )
+        print(o0)
 
-                run_fused_moe(
-                    hidden_states=hidden_state,
-                    w1=w1,
-                    w2=w2,
-                    gating_output=gating_output,
-                    topk=topk,
-                    override_config=config,
-                    renormalize=True,
-                    inplace=True,
-                    use_fp8=use_fp8,
-                    w1_scale=ws_scale,
-                    w2_scale=w2s_scale,
-                    routing_func=sparse_mixer_cache,
-                    cfg_id=cfg_id,
-                )
+        o1 = fused_moe.fused_moe(
+            hidden_states=hidden_state,
+            w1=w1_f32.half().transpose(1,2).contiguous(),
+            w2=w2_f32.half().transpose(1,2).contiguous(),
+            gating_output=gating_output,
+            topk=topk,
+            override_config=config,
+            renormalize=True,
+            inplace=True,
+            use_fp8=False,
+            routing_func=sparse_mixer_cache,
+        )
 
-                end.record()
-                torch.cuda.synchronize()
-                elapsed_time_ms = start.elapsed_time(end)
-
-                if j >= 10:
-                    all_time += elapsed_time_ms
-
-                break
-            
-            if all_time < min_time:
-                min_time = all_time
-                min_cfg_id = cfg_id
-                print(f"new config id > {tokens}, {cfg_id}, {all_time/times:.3f}")
-        
-        best_configs[tokens] = min_cfg_id
-
-    print(best_configs)    
-
+        print(o1)
 
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
 intermediate_size = 6400

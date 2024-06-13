@@ -149,19 +149,24 @@ def fused_moe(
     block_m = 16
     block_k = 128
     splitk = 4
+    ME = M + E // topk
 
     hidden_states_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float16)
 
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
+    
+    hidden_states = torch.cat((hidden_states, torch.empty((E//topk, K), dtype=hidden_states_dtype, device=hidden_states.device)), dim=0)
+    topk_weights = torch.cat((topk_weights, torch.empty((E//topk, topk), dtype=topk_weights.dtype, device=topk_weights.device)), dim=0)
+    topk_ids = torch.cat((topk_ids, torch.arange(0,E,1, dtype=topk_ids.dtype, device=topk_ids.device).view((E//topk, topk))), dim=0)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded, expert_off, expert_length = (
         moe_align_block_size(topk_ids, block_m, E)
     )
 
     intermediate_cache3 = torch.empty(
-        (M, topk, K),
+        (ME, topk, K),
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
@@ -227,6 +232,27 @@ def fused_moe(
         5,
         cfg_id,
     )
+
+    # ret_gathered_cache_1 = torch.empty(
+    #     (ME, 2, N),
+    #     device=hidden_states.device,
+    #     dtype=hidden_states.dtype,
+    # )
+
+    # gather_scatter_kernel.invoke_moe_scatter(
+    #     gathered_cache_1,
+    #     ret_gathered_cache_1.view(-1, N),
+    #     sorted_token_ids,
+    #     num_tokens_post_padded,
+    #     topk_ids,
+    #     block_m,
+    #     block_k,
+    #     topk,
+    #     splitk,
+    # )
+
+    # return ret_gathered_cache_1
+
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
     moe_kernel.grouped_gemm(
        gathered_cache_2,
@@ -251,10 +277,10 @@ def fused_moe(
         topk_weights=topk_weights,
     )
 
-    intermediate_cache3 = intermediate_cache3.to(hidden_states_dtype)
+    intermediate_cache3 = intermediate_cache3[:M*topk,:].to(hidden_states_dtype)
 
     if inplace:
-        hidden_states = hidden_states.view(dtype=hidden_states_dtype)
+        hidden_states = hidden_states[:M*topk, :].view(dtype=hidden_states_dtype)
         return torch.sum(
             intermediate_cache3.view(*intermediate_cache3.shape),
             dim=1,
