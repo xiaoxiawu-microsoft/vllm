@@ -131,25 +131,27 @@ def moe_perf(
     ws_scale = ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w1_f32.size(-1)).contiguous()
     w2s_scale = w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2_f32.size(-1)).contiguous()
 
-    # searchspace = list(range(32, 256, 32)) + list(range(256, 4097, 256))
-    searchspace = list(range(1792, 4097, 256))
+    searchspace = [1, 8] + list(range(16, 256, 16)) + list(range(256, 4097, 256))
+    #searchspace =  list(range(256, 2048, 256))
+    #searchspace = list(range(2048, 4097, 256))
+    #searchspace = list(range(2,8))
     best_configs = dict()
     for tokens in searchspace:
-        hidden_state = torch.ones(tokens, hidden_size).cuda().uniform_(-1,1).half()
-        gatew = torch.randn(hidden_size, experts).cuda().half()
-        gating_output = torch.matmul(hidden_state.half(), gatew).float()
-        topk_weights, topk_ids = sparsemixer(gating_output, topk)
-        def sparse_mixer_cache(gating_output, topk):
-            return topk_weights, topk_ids
-        
         min_time = 1000000.0
         min_cfg_id_0 = 0
         min_cfg_id_1 = 0
 
-        for cfg_id_0 in range(20, 30):
-            for cfg_id_1 in range(20, 30):
+        for cfg_id_0 in range(-1, 0):
+            for cfg_id_1 in range(-1, 0):
                 all_time = 0.0
                 for j in range(10 + times):
+                    hidden_state = torch.ones(tokens, hidden_size).cuda().uniform_(-1,1).half()
+                    gatew = torch.randn(hidden_size, experts).cuda().half()
+                    gating_output = torch.matmul(hidden_state.half(), gatew).float()
+                    topk_weights, topk_ids = sparsemixer(gating_output, topk)
+                    def sparse_mixer_cache(gating_output, topk):
+                        return topk_weights, topk_ids
+
                     start = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
                     start.record()

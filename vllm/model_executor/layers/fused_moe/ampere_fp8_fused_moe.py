@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe import gather_scatter_kernel
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.utils import print_warning_once
 
 import pycublas.trtllm_moe_grouped_gemm as moe_kernel
 
@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 # Ampere FP8 kernel
 from torch.utils.cpp_extension import load
 
+print_warning_once("Loading ampere_fp8 kernel")
 ampere_fp8 = load(
     name="ampere_fp8",
     sources=[
@@ -31,59 +32,46 @@ ampere_fp8 = load(
     ],
 )
 
-moe_kernel_cfg = {
-    4096: {
-        1: 4,
-        32: 5,
-        64: 4,
-        96: 5,
-        128: 4,
-        160: 17,
-        192: 17,
-        224: 16,
-        256: 16,
-        512: 23,
-        768: 26,
-        1024: 26,
-        1280: 23,
-        1536: 23,
-        1792: 26,
-        2048: 26,
-        2304: 27,
-        2560: 27,
-        2816: 27,
-        3072: 27,
-        3328: 27,
-        3584: 26,
-        3840: 26,
-        4096: 26,
-    },
-    6400: {
-        1: 4,
-        32: 4,
-        64: 4,
-        96: 4,
-        128: 4,
-        160: 16,
-        192: 16,
-        224: 16,
-        256: 16,
-        512: 20,
-        768: 26,
-        1024: 26,
-        1280: 22,
-        1536: 20,
-        1792: 26,
-        2048: 26,
-        2304: 20,
-        2560: 21,
-        2816: 26,
-        3072: 27,
-        3328: 26,
-        3584: 26,
-        3840: 26,
-        4096: 26,
-    },
+moe_gg_kernel_config = {
+    1: (13, 21, 0.4587008017301559),
+    2: (5, 11, 0.4829593604803085),
+    3: (11, 4, 0.55322624117136),
+    4: (5, 5, 0.6300467216968536),
+    5: (5, 9, 0.6892339181900025),
+    6: (5, 5, 0.7366860777139663),
+    7: (17, 9, 0.7817830407619476),
+    8: (5, 8, 0.8124313586950302),
+    16: (5, 5, 1.0158489656448364),
+    32: (4, 17, 1.0969907104969026),
+    48: (5, 4, 1.1068108654022217),
+    64: (17, 5, 1.1107225465774535),
+    80: (4, 5, 1.1139481484889984),
+    96: (16, 16, 1.1225907170772553),
+    112: (16, 16, 1.1334041678905487),
+    128: (17, 17, 1.137500158548355),
+    144: (16, 17, 1.144709119796753),
+    160: (16, 17, 1.1540889596939088),
+    176: (16, 16, 1.1627110350131988),
+    192: (17, 16, 1.1790643167495727),
+    208: (22, 16, 1.2127846336364747),
+    224: (23, 17, 1.2236697602272033),
+    240: (22, 22, 1.2352307152748108),
+    256: (23, 22, 1.2356915152072907),
+    512: (23, 22, 1.6425676786899566),
+    768: (27, 27, 1.7934028828144073),
+    1024: (27, 23, 2.4730009508132933),
+    1280: (22, 22, 3.02405633687973),
+    1536: (27, 22, 3.2711680245399477),
+    1792: (27, 26, 3.344619517326355),
+    2048: (27, 26, 4.023920638561249),
+    2304: (26, 22, 4.71138304233551),
+    2560: (27, 27, 4.861614079475403),
+    2816: (27, 27, 4.988712968826294),
+    3072: (26, 27, 5.624104981422424),
+    3328: (27, 26, 6.2363647985458375),
+    3584: (26, 26, 6.384680962562561),
+    3840: (26, 27, 6.581227521896363),
+    4096: (26, 27, 7.1324774312973025),
 }
 
 
@@ -141,8 +129,8 @@ def fused_moe(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     routing_func: Callable = torch.topk,
-    cfg_id_0=20,
-    cfg_id_1=20,
+    cfg_id_0=-1,
+    cfg_id_1=-1,
 ) -> torch.Tensor:
     hidden_states_dtype = activation.dtype
     hidden_states = activation.to(torch.float16)
@@ -152,6 +140,9 @@ def fused_moe(
     E, _, N = w1.shape
     block_m = 16
     block_k = 128
+
+    if cfg_id_0 < 1 or cfg_id_1 < 1:
+        cfg_id_0, cfg_id_1, _ = moe_gg_kernel_config[min(moe_gg_kernel_config.keys(), key=lambda x: abs(x - M))]
 
     topk_weights, topk_ids = routing_func(gating_output, topk)
 
@@ -217,13 +208,13 @@ def fused_moe(
     ops.silu_and_mul(gathered_cache_2, gathered_cache_1.view(-1, N))
 
     moe_kernel.grouped_gemm(
-       gathered_cache_2.view(torch.float16),
-       w2.view(torch.int8),
-       w2_scale.view(hidden_states.dtype),
-       total_rows_before_expert,
-       gathered_cache_3,
-       5,
-       cfg_id_1,
+        gathered_cache_2.view(torch.float16),
+        w2.view(torch.int8),
+        w2_scale.view(hidden_states.dtype),
+        total_rows_before_expert,
+        gathered_cache_3,
+        5,
+        cfg_id_1,
     )
 
     gather_scatter_kernel.invoke_moe_scatter(
@@ -239,7 +230,7 @@ def fused_moe(
         topk_weights=topk_weights,
     )
 
-    intermediate_cache3 = intermediate_cache3[:M,:,:].to(hidden_states_dtype)
+    intermediate_cache3 = intermediate_cache3[:M, :, :].to(hidden_states_dtype)
 
     if inplace:
         return torch.sum(
