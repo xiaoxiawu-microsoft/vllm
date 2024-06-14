@@ -366,7 +366,7 @@ class PhiMoE(nn.Module):
                 remove_subnormal_fp8(ws.view(torch.uint8))
                 remove_subnormal_fp8(w2s.view(torch.uint8))
 
-            if is_sm80():
+            if self.apply_a100_fp8:
                 print_warning_once("Preprocessing weights for A100 FP8 fused MoE")
                 ws = moe_kernel.preprocess_weights_for_mixed_gemm(ws.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w2s.device)
                 w2s = moe_kernel.preprocess_weights_for_mixed_gemm(w2s.view(torch.int8).transpose(1,2).contiguous().cpu()).to(ws.device)
