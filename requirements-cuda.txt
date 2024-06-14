@@ -13,5 +13,5 @@ gitpython
 pytest
 loguru
 # In case of invalide url, please install from this file:
-# vllm/model_executor/layers/fused_moe/pycublas.zip 
+#   pip install gitpython pytest loguru vllm/model_executor/layers/fused_moe/pycublas.zip
 git+https://github.com/wenxcs/pycublas.git@moe-group-gemm
